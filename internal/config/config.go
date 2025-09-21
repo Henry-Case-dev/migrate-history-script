@@ -6,14 +6,14 @@ type Config struct {
 	GeminiAPIKey             string
 	GeminiModelName          string
 	GeminiEmbeddingModelName string
-	
+
 	// PostgreSQL
 	PostgreSQLHost     string
 	PostgreSQLPort     string
 	PostgreSQLUser     string
 	PostgreSQLPassword string
 	PostgreSQLDBName   string
-	
+
 	// Общие настройки
 	Debug bool
 }

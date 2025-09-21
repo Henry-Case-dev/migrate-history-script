@@ -5,58 +5,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"migrate-history-script/internal/config"
 	"migrate-history-script/internal/gemini"
 	"migrate-history-script/internal/storage"
+	"migrate-history-script/internal/utils"
 )
-
-// loadEnvFile загружает переменные из .env файла
-func loadEnvFile(filename string) error {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		// Убираем комментарии в конце строки
-		if idx := strings.Index(value, "#"); idx >= 0 {
-			value = strings.TrimSpace(value[:idx])
-		}
-
-		// Убираем кавычки, если есть
-		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
-			value = value[1 : len(value)-1]
-		}
-
-		os.Setenv(key, value)
-	}
-	return nil
-}
-
-// getEnvOrDefault возвращает значение переменной окружения или значение по умолчанию
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
 
 func formatFileSize(bytes int64) string {
 	const unit = 1024
@@ -84,7 +39,7 @@ func testSetup() {
 
 	// Загружаем .env файл
 	envPath := filepath.Join(workDir, ".env")
-	if err := loadEnvFile(envPath); err != nil {
+	if err := utils.LoadEnvFile(envPath); err != nil {
 		log.Fatalf("❌ Не удалось загрузить .env файл: %v", err)
 	}
 	fmt.Printf("✅ Конфигурация загружена из: %s\n", envPath)
@@ -161,7 +116,7 @@ func testSetup() {
 	fmt.Println("\n🔗 Тестирование подключения к PostgreSQL...")
 
 	dbHost := os.Getenv("POSTGRESQL_HOST")
-	dbPort := getEnvOrDefault("POSTGRESQL_PORT", "5432")
+	dbPort := utils.GetEnvOrDefault("POSTGRESQL_PORT", "5432")
 	dbUser := os.Getenv("POSTGRESQL_USER")
 	dbPassword := os.Getenv("POSTGRESQL_PASSWORD")
 	dbName := os.Getenv("POSTGRESQL_DBNAME")
@@ -180,7 +135,7 @@ func testSetup() {
 	cfg := &config.Config{
 		GeminiAPIKey:             os.Getenv("GEMINI_API_KEY"),
 		GeminiModelName:          "gemini-2.5-flash",
-		GeminiEmbeddingModelName: getEnvOrDefault("GEMINI_EMBEDDING_MODEL_NAME", "embedding-001"),
+		GeminiEmbeddingModelName: utils.GetEnvOrDefault("GEMINI_EMBEDDING_MODEL_NAME", "embedding-001"),
 		Debug:                    false,
 	}
 
@@ -211,9 +166,9 @@ func testSetup() {
 
 	// Показываем настройки производительности
 	fmt.Println("\n⚙️ Настройки производительности:")
-	fmt.Printf("   • Запросов в минуту: %s\n", getEnvOrDefault("EMBEDDING_REQUESTS_PER_MINUTE", "240"))
-	fmt.Printf("   • Запросов в день: %s\n", getEnvOrDefault("EMBEDDING_REQUESTS_PER_DAY", "24000"))
-	fmt.Printf("   • Задержка между запросами: %s\n", getEnvOrDefault("EMBEDDING_REQUEST_DELAY", "300ms"))
+	fmt.Printf("   • Запросов в минуту: %s\n", utils.GetEnvOrDefault("EMBEDDING_REQUESTS_PER_MINUTE", "240"))
+	fmt.Printf("   • Запросов в день: %s\n", utils.GetEnvOrDefault("EMBEDDING_REQUESTS_PER_DAY", "24000"))
+	fmt.Printf("   • Задержка между запросами: %s\n", utils.GetEnvOrDefault("EMBEDDING_REQUEST_DELAY", "300ms"))
 
 	// Финальные рекомендации
 	fmt.Println("\n📝 Итоги проверки:")

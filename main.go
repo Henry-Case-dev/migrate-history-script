@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +18,8 @@ import (
 	"migrate-history-script/internal/gemini"
 	"migrate-history-script/internal/llm"
 	"migrate-history-script/internal/storage"
+	"migrate-history-script/internal/utils"
+
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/schollz/progressbar/v3"
 )
@@ -797,43 +798,6 @@ func min(a, b int) int {
 	return b
 }
 
-// loadEnvFile загружает переменные из .env файла
-func loadEnvFile(filename string) error {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		// Убираем комментарии в конце строки
-		if idx := strings.Index(value, "#"); idx >= 0 {
-			value = strings.TrimSpace(value[:idx])
-		}
-
-		// Убираем кавычки, если есть
-		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
-			value = value[1 : len(value)-1]
-		}
-
-		os.Setenv(key, value)
-	}
-	return nil
-}
-
 func main() {
 	log.Printf("[Migration] 🚀 Запуск миграции истории чата...")
 
@@ -854,7 +818,7 @@ func main() {
 	// Загружаем .env файл из рабочей директории
 	envPath := filepath.Join(workDir, ".env")
 	if _, err := os.Stat(envPath); err == nil {
-		if err := loadEnvFile(envPath); err != nil {
+		if err := utils.LoadEnvFile(envPath); err != nil {
 			log.Printf("⚠️ Предупреждение: не удалось загрузить %s: %v", envPath, err)
 		} else {
 			log.Printf("[Migration] ✅ Загружен конфигурационный файл: %s", envPath)
@@ -872,7 +836,7 @@ func main() {
 	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
 
 	// Настройки для векторизации с значениями по умолчанию
-	embeddingModel := getEnvOrDefault("GEMINI_EMBEDDING_MODEL_NAME", "embedding-001")
+	embeddingModel := utils.GetEnvOrDefault("GEMINI_EMBEDDING_MODEL_NAME", "embedding-001")
 
 	// Пути относительно рабочей директории
 	historyDir := filepath.Join(workDir, "data")
@@ -946,9 +910,9 @@ func main() {
 	log.Printf("[Migration] ✅ Gemini клиент инициализирован")
 
 	// Парсим конфигурацию для rate limiter из .env
-	reqPerMin := parseIntOrDefault(getEnvOrDefault("EMBEDDING_REQUESTS_PER_MINUTE", "240"), 240)
-	reqPerDay := parseIntOrDefault(getEnvOrDefault("EMBEDDING_REQUESTS_PER_DAY", "24000"), 24000)
-	delayStr := getEnvOrDefault("EMBEDDING_REQUEST_DELAY", "300ms")
+	reqPerMin := utils.ParseIntOrDefault(utils.GetEnvOrDefault("EMBEDDING_REQUESTS_PER_MINUTE", "240"), 240)
+	reqPerDay := utils.ParseIntOrDefault(utils.GetEnvOrDefault("EMBEDDING_REQUESTS_PER_DAY", "24000"), 24000)
+	delayStr := utils.GetEnvOrDefault("EMBEDDING_REQUEST_DELAY", "300ms")
 	delay, err := time.ParseDuration(delayStr)
 	if err != nil {
 		delay = 300 * time.Millisecond
@@ -976,24 +940,6 @@ func main() {
 	}
 
 	log.Printf("[Migration] 🎉 Миграция успешно завершена!")
-}
-
-// Утилитарные функции
-
-// getEnvOrDefault возвращает значение переменной окружения или значение по умолчанию
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-// parseIntOrDefault парсит строку в int или возвращает значение по умолчанию
-func parseIntOrDefault(str string, defaultValue int) int {
-	if value, err := strconv.Atoi(str); err == nil {
-		return value
-	}
-	return defaultValue
 }
 
 // setupFileLogging настраивает логирование в файл

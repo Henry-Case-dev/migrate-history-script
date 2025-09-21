@@ -4,7 +4,7 @@ package llm
 type LLMClient interface {
 	// EmbedContent генерирует векторное представление для текста
 	EmbedContent(text string) ([]float32, error)
-	
+
 	// Close закрывает соединение с клиентом
 	Close() error
 }

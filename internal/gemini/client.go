@@ -3,10 +3,10 @@ package gemini
 import (
 	"context"
 	"fmt"
-	
+
 	"migrate-history-script/internal/config"
 	"migrate-history-script/internal/llm"
-	
+
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
 )
@@ -22,14 +22,14 @@ type Client struct {
 // New создает новый клиент Gemini
 func New(cfg *config.Config, modelName, embeddingModelName string, debug bool) (llm.LLMClient, error) {
 	ctx := context.Background()
-	
+
 	client, err := genai.NewClient(ctx, option.WithAPIKey(cfg.GeminiAPIKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
-	
+
 	embeddingModel := client.EmbeddingModel(embeddingModelName)
-	
+
 	return &Client{
 		client:         client,
 		embeddingModel: embeddingModel,
@@ -43,16 +43,16 @@ func (c *Client) EmbedContent(text string) ([]float32, error) {
 	if text == "" {
 		return nil, fmt.Errorf("empty text provided")
 	}
-	
+
 	embedding, err := c.embeddingModel.EmbedContent(c.ctx, genai.Text(text))
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate embedding: %w", err)
 	}
-	
+
 	if embedding == nil || embedding.Embedding == nil {
 		return nil, fmt.Errorf("received nil embedding")
 	}
-	
+
 	return embedding.Embedding.Values, nil
 }
 

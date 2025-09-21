@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "github.com/lib/pq"
@@ -139,7 +140,17 @@ func (ps *PostgresStorage) UpdateMessageEmbeddingWithContext(chatID int64, messa
 	`
 
 	// Конвертируем []float32 в строку для pgvector
-	embeddingStr := fmt.Sprintf("[%v]", embedding)
+	// Создаем правильный формат для pgvector: [1.0,2.0,3.0]
+	var builder strings.Builder
+	builder.WriteString("[")
+	for i, v := range embedding {
+		if i > 0 {
+			builder.WriteString(",")
+		}
+		builder.WriteString(fmt.Sprintf("%.8f", v))
+	}
+	builder.WriteString("]")
+	embeddingStr := builder.String()
 
 	_, err := ps.db.Exec(query, embeddingStr, context, chatID, messageID)
 	if err != nil {

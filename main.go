@@ -809,7 +809,7 @@ func main() {
 	workDir := filepath.Dir(execPath)
 
 	// Если запускаем через go run, используем текущую директорию
-	if strings.Contains(execPath, "tmp") {
+	if strings.Contains(execPath, "tmp") || strings.Contains(execPath, "go-build") {
 		workDir, _ = os.Getwd()
 	}
 

@@ -10,7 +10,6 @@ migrate-history-script
 *.swo
 
 # Конфигурация
-.env
 
 # Логи и временные файлы
 *.log

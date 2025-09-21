@@ -1,0 +1,42 @@
+# Бинарные файлы
+*.exe
+migrate_history
+migrate-history-script
+
+# Go vendor
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Конфигурация и чувствительные данные
+.env
+.env.local
+.env.*.local
+
+# Логи и временные файлы
+*.log
+*.tmp
+migration.log
+
+# Состояние миграции (опционально - можно коммитить для отслеживания прогресса)
+migration_state.json
+
+# Кэш эмбеддингов
+cache/
+*.cache
+
+# Данные (JSON файлы экспорта)
+data/*.json
+!data/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+go.work
+go.work.sum

@@ -438,7 +438,9 @@ type HistoryMigrator struct {
 }
 
 func NewHistoryMigrator(storage *storage.PostgresStorage, embedder *ContextualEmbedder, stateFile string, maxRetries int) *HistoryMigrator {
-	if maxRetries <= 0 {
+	// maxRetries = 0 - это специальное значение для бесконечного режима
+	// Только отрицательные значения заменяются на дефолт
+	if maxRetries < 0 {
 		maxRetries = 5 // Значение по умолчанию
 	}
 

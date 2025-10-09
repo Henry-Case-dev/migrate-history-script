@@ -441,7 +441,7 @@ func NewHistoryMigrator(storage *storage.PostgresStorage, embedder *ContextualEm
 	if maxRetries <= 0 {
 		maxRetries = 5 // Значение по умолчанию
 	}
-	
+
 	migrator := &HistoryMigrator{
 		storage:    storage,
 		embedder:   embedder,
@@ -691,19 +691,62 @@ func (hm *HistoryMigrator) processBatch(batch []TelegramExportMessage, allMessag
 // processMessageWithRetry обрабатывает одно сообщение с retry логикой
 func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, allMessages []TelegramExportMessage, chatID int64) error {
 	baseDelay := 2 * time.Second
+	maxDelayPerAttempt := 60 * time.Minute // Максимальная задержка между попытками
+	maxTotalDuration := 24 * time.Hour     // Максимальное время попыток
 
 	var lastErr error
+	startTime := time.Now()
+	attempt := 0
 
-	for attempt := 0; attempt < hm.maxRetries; attempt++ {
-		if attempt > 0 {
-			// Экспоненциальная задержка: 2s, 4s, 8s, 16s, 32s
-			delay := baseDelay * time.Duration(1<<uint(attempt-1))
-			if delay > 60*time.Second {
-				delay = 60 * time.Second
+	// Бесконечный режим (maxRetries = 0) или ограниченный
+	infiniteMode := hm.maxRetries == 0
+
+	for {
+		// Проверяем превышение максимального времени (только для бесконечного режима)
+		if infiniteMode {
+			elapsed := time.Since(startTime)
+			if elapsed >= maxTotalDuration {
+				log.Printf("⏰ [TIMEOUT] Превышено максимальное время обработки сообщения %d (24 часа)", msg.ID)
+				log.Printf("💾 [TIMEOUT] Сохраняю состояние перед завершением...")
+				hm.saveState()
+				log.Fatalf("❌ [CRITICAL] Не удалось обработать сообщение %d за 24 часа.\n"+
+					"Последняя ошибка: %v\n"+
+					"Миграция остановлена. Проверьте настройки API и попробуйте снова.", msg.ID, lastErr)
 			}
-			log.Printf("⏳ [Retry %d/%d] Ожидание %v перед повторной попыткой для сообщения %d", 
-				attempt+1, hm.maxRetries, delay, msg.ID)
-			time.Sleep(delay)
+		} else {
+			// Ограниченный режим - проверяем количество попыток
+			if attempt >= hm.maxRetries {
+				break
+			}
+		}
+
+		if attempt > 0 {
+			var delay time.Duration
+
+			if infiniteMode {
+				// Экспоненциальная задержка до 60 минут, затем фиксированная 60 минут
+				delay = baseDelay * time.Duration(1<<uint(min(attempt-1, 10))) // Ограничиваем экспоненту
+				if delay > maxDelayPerAttempt {
+					delay = maxDelayPerAttempt
+				}
+
+				elapsed := time.Since(startTime)
+				remaining := maxTotalDuration - elapsed
+
+				log.Printf("⏳ [Бесконечный режим] Попытка %d | Прошло: %v | Осталось: %v | Следующая попытка через: %v",
+					attempt+1, elapsed.Round(time.Minute), remaining.Round(time.Minute), delay)
+			} else {
+				// Обычная экспоненциальная задержка для ограниченного режима
+				delay = baseDelay * time.Duration(1<<uint(attempt-1))
+				if delay > 60*time.Second {
+					delay = 60 * time.Second
+				}
+				log.Printf("⏳ [Retry %d/%d] Ожидание %v перед повторной попыткой для сообщения %d",
+					attempt+1, hm.maxRetries, delay, msg.ID)
+			}
+
+			// Проверяем паузу во время ожидания
+			hm.waitWithPauseCheck(delay)
 		}
 
 		// Преобразуем в формат tgbotapi.Message
@@ -719,39 +762,82 @@ func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, a
 		embedding, context, err := hm.embedder.GenerateEmbeddingWithContext(msg, allMessages, globalIndex)
 		if err != nil {
 			lastErr = fmt.Errorf("ошибка генерации эмбеддинга: %w", err)
-			log.Printf("❌ [Attempt %d/%d] Ошибка генерации эмбеддинга для сообщения %d: %v", 
-				attempt+1, hm.maxRetries, msg.ID, err)
+			if infiniteMode {
+				log.Printf("❌ [Попытка %d] Ошибка генерации эмбеддинга для сообщения %d: %v", attempt+1, msg.ID, err)
+			} else {
+				log.Printf("❌ [Attempt %d/%d] Ошибка генерации эмбеддинга для сообщения %d: %v",
+					attempt+1, hm.maxRetries, msg.ID, err)
+			}
+			attempt++
 			continue
 		}
 
 		// Сохраняем сообщение в базу данных
 		if err := hm.storage.AddMessage(chatID, tgMsg); err != nil {
 			lastErr = fmt.Errorf("ошибка сохранения сообщения в БД: %w", err)
-			log.Printf("❌ [Attempt %d/%d] Ошибка сохранения сообщения %d в БД: %v", 
-				attempt+1, hm.maxRetries, msg.ID, err)
+			if infiniteMode {
+				log.Printf("❌ [Попытка %d] Ошибка сохранения сообщения %d в БД: %v", attempt+1, msg.ID, err)
+			} else {
+				log.Printf("❌ [Attempt %d/%d] Ошибка сохранения сообщения %d в БД: %v",
+					attempt+1, hm.maxRetries, msg.ID, err)
+			}
+			attempt++
 			continue
 		}
 
 		// Сохраняем эмбеддинг в PostgreSQL
 		if err := hm.storage.UpdateMessageEmbeddingWithContext(chatID, msg.ID, embedding, context); err != nil {
 			lastErr = fmt.Errorf("ошибка сохранения эмбеддинга в БД: %w", err)
-			log.Printf("❌ [Attempt %d/%d] Ошибка сохранения эмбеддинга для сообщения %d: %v", 
-				attempt+1, hm.maxRetries, msg.ID, err)
+			if infiniteMode {
+				log.Printf("❌ [Попытка %d] Ошибка сохранения эмбеддинга для сообщения %d: %v", attempt+1, msg.ID, err)
+			} else {
+				log.Printf("❌ [Attempt %d/%d] Ошибка сохранения эмбеддинга для сообщения %d: %v",
+					attempt+1, hm.maxRetries, msg.ID, err)
+			}
+			attempt++
 			continue
 		}
 
 		// Успешно обработано!
 		hm.state.VectorizedCount++
-		
+
 		if attempt > 0 {
-			log.Printf("✅ [Success] Сообщение %d успешно обработано после %d попыток", msg.ID, attempt+1)
+			elapsed := time.Since(startTime)
+			if infiniteMode {
+				log.Printf("✅ [Success] Сообщение %d успешно обработано после %d попыток за %v",
+					msg.ID, attempt+1, elapsed.Round(time.Second))
+			} else {
+				log.Printf("✅ [Success] Сообщение %d успешно обработано после %d попыток", msg.ID, attempt+1)
+			}
 		}
-		
+
 		return nil
 	}
 
-	// Все попытки исчерпаны
+	// Достигнут лимит попыток (только для ограниченного режима)
 	return fmt.Errorf("превышено количество попыток (%d): %w", hm.maxRetries, lastErr)
+}
+
+// waitWithPauseCheck ожидает указанное время с проверкой паузы
+func (hm *HistoryMigrator) waitWithPauseCheck(duration time.Duration) {
+	endTime := time.Now().Add(duration)
+	for time.Now().Before(endTime) {
+		hm.checkPause()
+		remaining := time.Until(endTime)
+		if remaining <= 0 {
+			break
+		}
+		sleepDuration := minDuration(1*time.Second, remaining)
+		time.Sleep(sleepDuration)
+	}
+}
+
+// minDuration возвращает минимальное из двух значений Duration
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // logDetailedProgress выводит детальную информацию о прогрессе

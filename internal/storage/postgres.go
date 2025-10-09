@@ -95,11 +95,13 @@ func (ps *PostgresStorage) createTables() error {
 }
 
 // AddMessage добавляет сообщение в базу данных
-func (ps *PostgresStorage) AddMessage(chatID int64, message *tgbotapi.Message) error {
+// Возвращает true если сообщение было добавлено, false если уже существовало
+func (ps *PostgresStorage) AddMessage(chatID int64, message *tgbotapi.Message) (bool, error) {
 	query := `
 		INSERT INTO messages (chat_id, message_id, user_id, username, first_name, last_name, text, date_sent, reply_to_message_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (chat_id, message_id) DO NOTHING
+		RETURNING message_id
 	`
 
 	var userID sql.NullInt64
@@ -117,18 +119,22 @@ func (ps *PostgresStorage) AddMessage(chatID int64, message *tgbotapi.Message) e
 		replyToMessageID = sql.NullInt32{Int32: int32(message.ReplyToMessage.MessageID), Valid: true}
 	}
 
-	_, err := ps.db.Exec(query, chatID, message.MessageID, userID, username, firstName, lastName,
-		message.Text, message.Time(), replyToMessageID)
+	var returnedMessageID sql.NullInt32
+	err := ps.db.QueryRow(query, chatID, message.MessageID, userID, username, firstName, lastName,
+		message.Text, message.Time(), replyToMessageID).Scan(&returnedMessageID)
+
+	if err == sql.ErrNoRows {
+		// Сообщение уже существует (ON CONFLICT сработал)
+		// Не логируем - суммарный лог будет в processBatch
+		return false, nil
+	}
 
 	if err != nil {
-		return fmt.Errorf("failed to insert message: %w", err)
+		return false, fmt.Errorf("failed to insert message: %w", err)
 	}
 
-	if ps.debug {
-		log.Printf("Added message %d to chat %d", message.MessageID, chatID)
-	}
-
-	return nil
+	// Успешно добавлено - не логируем индивидуально, суммарный лог в processBatch
+	return true, nil
 }
 
 // UpdateMessageEmbeddingWithContext обновляет эмбеддинг сообщения с контекстом

@@ -634,9 +634,30 @@ func (hm *HistoryMigrator) processJSONFile(filePath string) error {
 
 	log.Printf("[File] %s: валидных сообщений для обработки: %d", filepath.Base(filePath), len(validMessages))
 
-	// Обрабатываем сообщения
+	// Определяем стартовый индекс
+	startIndex := 0
+
+	if hm.state.CurrentFile == filePath && hm.state.CurrentIndex > 0 {
+		// Продолжаем с сохраненной позиции
+		startIndex = hm.state.CurrentIndex
+		log.Printf("[File] 🔄 Возобновление с индекса %d (пропущено %d сообщений)",
+			startIndex, startIndex)
+	} else {
+		// Новый файл или начало - начинаем с начала
+		hm.state.CurrentIndex = 0
+		hm.state.CurrentFile = filePath
+		log.Printf("[File] ▶️  Начинаем обработку файла с начала")
+	}
+
+	// Если файл уже полностью обработан
+	if startIndex >= len(validMessages) {
+		log.Printf("[File] ✅ Файл уже полностью обработан, пропускаем")
+		return nil
+	}
+
+	// Обрабатываем сообщения начиная с startIndex
 	batchSize := 50
-	for i := 0; i < len(validMessages); i += batchSize {
+	for i := startIndex; i < len(validMessages); i += batchSize {
 		hm.checkPause() // Проверяем паузу
 
 		end := i + batchSize
@@ -650,48 +671,73 @@ func (hm *HistoryMigrator) processJSONFile(filePath string) error {
 			continue
 		}
 
+		// Обновляем текущий индекс после успешной обработки пакета
+		hm.state.CurrentIndex = end
+		hm.saveState()
+
 		// Небольшая пауза между пакетами
 		time.Sleep(1 * time.Second)
 	}
+
+	// Файл полностью обработан - сбрасываем индекс
+	log.Printf("[File] Файл %s полностью обработан", filepath.Base(filePath))
+	hm.state.CurrentIndex = 0
 
 	return nil
 }
 
 func (hm *HistoryMigrator) processBatch(batch []TelegramExportMessage, allMessages []TelegramExportMessage, chatID int64) error {
+	skippedCount := 0
+	processedCount := 0
+
 	for _, msg := range batch {
 		hm.checkPause() // Проверяем паузу
 
 		// Пытаемся обработать сообщение с retry
-		if err := hm.processMessageWithRetry(&msg, allMessages, chatID); err != nil {
+		wasProcessed, err := hm.processMessageWithRetry(&msg, allMessages, chatID)
+		if err != nil {
 			log.Printf("❌ [CRITICAL] Не удалось обработать сообщение %d после всех попыток: %v", msg.ID, err)
 			// Пропускаем это сообщение и продолжаем
 			continue
 		}
 
-		// Увеличиваем счетчик только после успешной обработки
-		hm.state.ProcessedCount++
+		// Увеличиваем счетчик только если сообщение было реально обработано (не skip)
+		if wasProcessed {
+			processedCount++
+			hm.state.ProcessedCount++
 
-		// Обновляем прогресс-бар
-		if hm.progressBar != nil {
-			hm.progressBar.Set(hm.state.ProcessedCount)
-		}
+			// Обновляем прогресс-бар
+			if hm.progressBar != nil {
+				hm.progressBar.Set(hm.state.ProcessedCount)
+			}
 
-		// Сохраняем состояние каждые 10 сообщений
-		if hm.state.ProcessedCount%10 == 0 {
-			hm.saveState()
-		}
+			// Сохраняем состояние каждые 10 сообщений
+			if hm.state.ProcessedCount%10 == 0 {
+				hm.saveState()
+			}
 
-		// Детальная статистика каждые 100 сообщений
-		if hm.state.ProcessedCount%100 == 0 {
-			hm.logDetailedProgress()
+			// Детальная статистика каждые 100 сообщений
+			if hm.state.ProcessedCount%100 == 0 {
+				hm.logDetailedProgress()
+			}
+		} else {
+			skippedCount++
 		}
+	}
+
+	// Логируем итоги батча только если были дубликаты
+	if skippedCount > 0 && processedCount > 0 {
+		log.Printf("📦 [Batch] Обработано: %d новых, %d дубликатов", processedCount, skippedCount)
+	} else if skippedCount > 0 {
+		log.Printf("📦 [Batch] Пропущено %d дубликатов", skippedCount)
 	}
 
 	return nil
 }
 
 // processMessageWithRetry обрабатывает одно сообщение с retry логикой
-func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, allMessages []TelegramExportMessage, chatID int64) error {
+// Возвращает (wasProcessed, error) где wasProcessed=true если сообщение было реально обработано
+func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, allMessages []TelegramExportMessage, chatID int64) (bool, error) {
 	baseDelay := 2 * time.Second
 	maxDelayPerAttempt := 60 * time.Minute // Максимальная задержка между попытками
 	maxTotalDuration := 24 * time.Hour     // Максимальное время попыток
@@ -757,7 +803,7 @@ func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, a
 		// Находим индекс сообщения в контексте
 		globalIndex := hm.findMessageIndex(msg.ID, allMessages)
 		if globalIndex < 0 {
-			return fmt.Errorf("message not found in context")
+			return false, fmt.Errorf("message not found in context")
 		}
 
 		// Генерируем эмбеддинг
@@ -775,7 +821,8 @@ func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, a
 		}
 
 		// Сохраняем сообщение в базу данных
-		if err := hm.storage.AddMessage(chatID, tgMsg); err != nil {
+		wasAdded, err := hm.storage.AddMessage(chatID, tgMsg)
+		if err != nil {
 			lastErr = fmt.Errorf("ошибка сохранения сообщения в БД: %w", err)
 			if infiniteMode {
 				log.Printf("❌ [Попытка %d] Ошибка сохранения сообщения %d в БД: %v", attempt+1, msg.ID, err)
@@ -785,6 +832,14 @@ func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, a
 			}
 			attempt++
 			continue
+		}
+
+		// Если сообщение уже существовало (не было добавлено)
+		if !wasAdded {
+			// Проверяем есть ли у него уже эмбеддинг
+			// Если нет - обновляем эмбеддинг, если есть - пропускаем полностью
+			// Для простоты пока просто пропускаем (можно улучшить позже)
+			return false, nil // Не обработано (дубликат)
 		}
 
 		// Сохраняем эмбеддинг в PostgreSQL
@@ -813,11 +868,11 @@ func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, a
 			}
 		}
 
-		return nil
+		return true, nil // Успешно обработано
 	}
 
 	// Достигнут лимит попыток (только для ограниченного режима)
-	return fmt.Errorf("превышено количество попыток (%d): %w", hm.maxRetries, lastErr)
+	return false, fmt.Errorf("превышено количество попыток (%d): %w", hm.maxRetries, lastErr)
 }
 
 // waitWithPauseCheck ожидает указанное время с проверкой паузы

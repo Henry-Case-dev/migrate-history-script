@@ -1,10 +1,10 @@
 {
   "current_file": "C:\\Users\\henry\\Dev\\migrate_history\\data\\10.08.2025.json",
   "processed_files": null,
-  "current_index": 0,
+  "current_index": 200,
   "total_messages": 1091448,
-  "processed_count": 12844,
-  "vectorized_count": 12716,
-  "last_update_time": "2025-10-10T00:40:14.5830469+12:00",
+  "processed_count": 13820,
+  "vectorized_count": 13692,
+  "last_update_time": "2025-10-10T01:41:42.5444959+12:00",
   "chat_messages_map": {}
 }

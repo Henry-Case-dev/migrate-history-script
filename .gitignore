@@ -1,35 +1,6 @@
-# Бинарные файлы
-*.exe
-migrate_history
-migrate-history-script
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Конфигурация
-
-# Логи и временные файлы
+# Логи (единственное что не коммитим)
 *.log
-*.tmp
 migration.log
 
-# Состояние миграции (можно включить для отслеживания прогресса)
-# migration_state.json
-
-# Кэш эмбеддингов
-cache/embeddings/
-*.cache
-
-# Данные (JSON файлы экспорта)
+# JSON данные из папки data (слишком большие для git)
 data/*.json
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Go
-go.work
-go.work.sum

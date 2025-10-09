@@ -434,14 +434,20 @@ type HistoryMigrator struct {
 	progressBar *progressbar.ProgressBar
 	isPaused    bool
 	pauseMu     sync.RWMutex
+	maxRetries  int // Максимальное количество попыток для каждого сообщения
 }
 
-func NewHistoryMigrator(storage *storage.PostgresStorage, embedder *ContextualEmbedder, stateFile string) *HistoryMigrator {
+func NewHistoryMigrator(storage *storage.PostgresStorage, embedder *ContextualEmbedder, stateFile string, maxRetries int) *HistoryMigrator {
+	if maxRetries <= 0 {
+		maxRetries = 5 // Значение по умолчанию
+	}
+	
 	migrator := &HistoryMigrator{
-		storage:   storage,
-		embedder:  embedder,
-		stateFile: stateFile,
-		state:     &MigrationState{ChatMessagesMap: make(map[int64]int)},
+		storage:    storage,
+		embedder:   embedder,
+		stateFile:  stateFile,
+		state:      &MigrationState{ChatMessagesMap: make(map[int64]int)},
+		maxRetries: maxRetries,
 	}
 
 	migrator.loadState()
@@ -653,29 +659,15 @@ func (hm *HistoryMigrator) processBatch(batch []TelegramExportMessage, allMessag
 	for _, msg := range batch {
 		hm.checkPause() // Проверяем паузу
 
-		// Преобразуем в формат tgbotapi.Message
-		tgMsg := hm.convertToTelegramMessage(&msg, chatID)
-
-		// Сохраняем сообщение в базу данных
-		hm.storage.AddMessage(chatID, tgMsg)
-
-		hm.state.ProcessedCount++
-
-		// Генерируем эмбеддинг
-		globalIndex := hm.findMessageIndex(msg.ID, allMessages)
-		if globalIndex >= 0 {
-			embedding, context, err := hm.embedder.GenerateEmbeddingWithContext(&msg, allMessages, globalIndex)
-			if err != nil {
-				log.Printf("❌ [ERROR] Ошибка генерации эмбеддинга для сообщения %d: %v", msg.ID, err)
-			} else {
-				// Сохраняем эмбеддинг в PostgreSQL
-				if err := hm.storage.UpdateMessageEmbeddingWithContext(chatID, msg.ID, embedding, context); err != nil {
-					log.Printf("❌ [ERROR] Ошибка сохранения эмбеддинга для сообщения %d: %v", msg.ID, err)
-				} else {
-					hm.state.VectorizedCount++
-				}
-			}
+		// Пытаемся обработать сообщение с retry
+		if err := hm.processMessageWithRetry(&msg, allMessages, chatID); err != nil {
+			log.Printf("❌ [CRITICAL] Не удалось обработать сообщение %d после всех попыток: %v", msg.ID, err)
+			// Пропускаем это сообщение и продолжаем
+			continue
 		}
+
+		// Увеличиваем счетчик только после успешной обработки
+		hm.state.ProcessedCount++
 
 		// Обновляем прогресс-бар
 		if hm.progressBar != nil {
@@ -694,6 +686,72 @@ func (hm *HistoryMigrator) processBatch(batch []TelegramExportMessage, allMessag
 	}
 
 	return nil
+}
+
+// processMessageWithRetry обрабатывает одно сообщение с retry логикой
+func (hm *HistoryMigrator) processMessageWithRetry(msg *TelegramExportMessage, allMessages []TelegramExportMessage, chatID int64) error {
+	baseDelay := 2 * time.Second
+
+	var lastErr error
+
+	for attempt := 0; attempt < hm.maxRetries; attempt++ {
+		if attempt > 0 {
+			// Экспоненциальная задержка: 2s, 4s, 8s, 16s, 32s
+			delay := baseDelay * time.Duration(1<<uint(attempt-1))
+			if delay > 60*time.Second {
+				delay = 60 * time.Second
+			}
+			log.Printf("⏳ [Retry %d/%d] Ожидание %v перед повторной попыткой для сообщения %d", 
+				attempt+1, hm.maxRetries, delay, msg.ID)
+			time.Sleep(delay)
+		}
+
+		// Преобразуем в формат tgbotapi.Message
+		tgMsg := hm.convertToTelegramMessage(msg, chatID)
+
+		// Находим индекс сообщения в контексте
+		globalIndex := hm.findMessageIndex(msg.ID, allMessages)
+		if globalIndex < 0 {
+			return fmt.Errorf("message not found in context")
+		}
+
+		// Генерируем эмбеддинг
+		embedding, context, err := hm.embedder.GenerateEmbeddingWithContext(msg, allMessages, globalIndex)
+		if err != nil {
+			lastErr = fmt.Errorf("ошибка генерации эмбеддинга: %w", err)
+			log.Printf("❌ [Attempt %d/%d] Ошибка генерации эмбеддинга для сообщения %d: %v", 
+				attempt+1, hm.maxRetries, msg.ID, err)
+			continue
+		}
+
+		// Сохраняем сообщение в базу данных
+		if err := hm.storage.AddMessage(chatID, tgMsg); err != nil {
+			lastErr = fmt.Errorf("ошибка сохранения сообщения в БД: %w", err)
+			log.Printf("❌ [Attempt %d/%d] Ошибка сохранения сообщения %d в БД: %v", 
+				attempt+1, hm.maxRetries, msg.ID, err)
+			continue
+		}
+
+		// Сохраняем эмбеддинг в PostgreSQL
+		if err := hm.storage.UpdateMessageEmbeddingWithContext(chatID, msg.ID, embedding, context); err != nil {
+			lastErr = fmt.Errorf("ошибка сохранения эмбеддинга в БД: %w", err)
+			log.Printf("❌ [Attempt %d/%d] Ошибка сохранения эмбеддинга для сообщения %d: %v", 
+				attempt+1, hm.maxRetries, msg.ID, err)
+			continue
+		}
+
+		// Успешно обработано!
+		hm.state.VectorizedCount++
+		
+		if attempt > 0 {
+			log.Printf("✅ [Success] Сообщение %d успешно обработано после %d попыток", msg.ID, attempt+1)
+		}
+		
+		return nil
+	}
+
+	// Все попытки исчерпаны
+	return fmt.Errorf("превышено количество попыток (%d): %w", hm.maxRetries, lastErr)
 }
 
 // logDetailedProgress выводит детальную информацию о прогрессе
@@ -927,8 +985,12 @@ func main() {
 	// Создаем embedder
 	embedder := NewContextualEmbedder(llmClient, rateLimiter, cacheDir)
 
+	// Получаем maxRetries из .env
+	maxRetries := utils.ParseIntOrDefault(utils.GetEnvOrDefault("EMBEDDING_MAX_RETRIES", "5"), 5)
+	log.Printf("[Migration] 🔄 Максимальное количество повторных попыток: %d", maxRetries)
+
 	// Создаем мигратор
-	migrator := NewHistoryMigrator(storage, embedder, stateFile)
+	migrator := NewHistoryMigrator(storage, embedder, stateFile, maxRetries)
 
 	// Настраиваем обработку сигналов для корректной остановки
 	setupSignalHandling(migrator)
